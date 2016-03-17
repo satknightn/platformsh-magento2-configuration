@@ -348,10 +348,19 @@ class Platformsh
         $this->execute('rm -rf var/view_preprocessed/*');
         $this->execute('rm -rf pub/static/*');
 
-        $this->log("Generating static content.");
+        $locales = '';
+        $this->executeDbQuery("select value from core_config_data where path='general/locale/code';");
+        if (is_array($this->lastOutput) && count($this->lastOutput) > 1) {
+            $locales = $this->lastOutput;
+            array_shift($locales);
+            $locales = implode(' ', $locales);
+        }
+
+        $logMessage = $locales ? "Generating static content for locales $locales." : "Generating static content.";
+        $this->log($logMessage);
 
         $this->execute(
-            "cd bin/; /usr/bin/php ./magento setup:static-content:deploy"
+            "cd bin/; /usr/bin/php ./magento setup:static-content:deploy $locales"
         );
     }
 
@@ -456,5 +465,17 @@ class Platformsh
                 $version
             ]
         );
+    }
+
+    /**
+     * Executes database query
+     * 
+     * @param string $query
+     * $query must completed, finished with semicolon (;)
+     */
+    protected function executeDbQuery($query)
+    {
+        $password = strlen($this->dbPassword) ? sprintf('-p%s', $this->dbPassword) : '';
+        $this->execute("mysql -u $this->dbUser -h $this->dbHost -e \"$query\" $password $this->dbName");
     }
 }
