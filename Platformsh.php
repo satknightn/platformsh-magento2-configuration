@@ -27,12 +27,15 @@ class Platformsh
     protected $dbUser;
     protected $dbPassword;
 
-    protected $adminUsername;
-    protected $adminFirstname;
-    protected $adminLastname;
-    protected $adminEmail;
-    protected $adminPassword;
-    protected $adminUrl;
+    protected $adminVariables = array(
+        'ADMIN_USERNAME',
+        'ADMIN_FIRSTNAME',
+        'ADMIN_LASTNAME',
+        'ADMIN_EMAIL',
+        'ADMIN_PASSWORD',
+        'ADMIN_URL'
+    );
+    protected $missingAdminVariables = array();
 
     protected $redisHost;
     protected $redisScheme;
@@ -122,16 +125,19 @@ class Platformsh
         }
 
         if (!file_exists('app/etc/env.php')) {
-            $this->installMagento();
+            if (empty($this->missingAdminVariables)) {
+                $this->installMagento();
+            } else {
+                $this->log(sprintf('Magento installation aborted - missing required admin variable%s %s',
+                    (count($this->missingAdminVariables) > 1 ? 's' : ''), implode(', ', $this->missingAdminVariables)));
+            }
         } else {
             $this->updateMagento();
         }
-        $this->processMagentoMode();
-        $this->disableGoogleAnalytics();
     }
 
     /**
-     * Prepare data needed to install Magento
+     * Prepare data needed to install/update Magento
      */
     protected function _init()
     {
@@ -147,12 +153,13 @@ class Platformsh
         $this->dbUser = $relationships["database"][0]["username"];
         $this->dbPassword = $relationships["database"][0]["password"];
 
-        $this->adminUsername = isset($var["ADMIN_USERNAME"]) ? $var["ADMIN_USERNAME"] : "admin";
-        $this->adminFirstname = isset($var["ADMIN_FIRSTNAME"]) ? $var["ADMIN_FIRSTNAME"] : "John";
-        $this->adminLastname = isset($var["ADMIN_LASTNAME"]) ? $var["ADMIN_LASTNAME"] : "Doe";
-        $this->adminEmail = isset($var["ADMIN_EMAIL"]) ? $var["ADMIN_EMAIL"] : "john@example.com";
-        $this->adminPassword = isset($var["ADMIN_PASSWORD"]) ? $var["ADMIN_PASSWORD"] : "admin12";
-        $this->adminUrl = isset($var["ADMIN_URL"]) ? $var["ADMIN_URL"] : "admin";
+        foreach ($this->adminVariables as $adminVariable) {
+            if (isset($var[$adminVariable]) && $var[$adminVariable]) {
+                $this->adminVariables[$adminVariable] = $var[$adminVariable];
+            } else {
+                $this->missingAdminVariables[] = $adminVariable;
+            }
+        }
 
         $this->desiredApplicationMode = isset($var["APPLICATION_MODE"]) ? $var["APPLICATION_MODE"] : false;
         $this->desiredApplicationMode =
@@ -222,19 +229,22 @@ class Platformsh
             --db-host=$this->dbHost \
             --db-name=$this->dbName \
             --db-user=$this->dbUser \
-            --backend-frontname=$this->adminUrl \
-            --admin-user=$this->adminUsername \
-            --admin-firstname=$this->adminFirstname \
-            --admin-lastname=$this->adminLastname \
-            --admin-email=$this->adminEmail \
-            --admin-password=$this->adminPassword";
-
+            --backend-frontname={$this->adminVariables['ADMIN_URL']} \
+            --admin-user={$this->adminVariables['ADMIN_USERNAME']} \
+            --admin-firstname={$this->adminVariables['ADMIN_FIRSTNAME']} \
+            --admin-lastname={$this->adminVariables['ADMIN_LASTNAME']} \
+            --admin-email={$this->adminVariables['ADMIN_EMAIL']} \
+            --admin-password={$this->adminVariables['ADMIN_PASSWORD']}";
+        
         if (strlen($this->dbPassword)) {
             $command .= " \
             --db-password=$this->dbPassword";
         }
 
         $this->execute($command);
+
+        $this->processMagentoMode();
+        $this->disableGoogleAnalytics();
     }
 
     /**
@@ -246,7 +256,12 @@ class Platformsh
 
         $this->updateConfiguration();
 
-        $this->updateAdminCredentials();
+        if (empty($this->missingAdminVariables)) {
+            $this->updateAdminCredentials();
+        } else {
+            $this->log(sprintf('Admin credentials won\'t be updated - %s %s not set',
+                implode(', ', $this->missingAdminVariables), (count($this->missingAdminVariables) > 1 ? 'are' : 'is')));
+        }
 
         $this->updateSolrConfiguration();
 
@@ -255,6 +270,10 @@ class Platformsh
         $this->setupUpgrade();
 
         $this->clearCache();
+
+        $this->processMagentoMode();
+
+        $this->disableGoogleAnalytics();
     }
 
     /**
@@ -264,7 +283,13 @@ class Platformsh
     {
         $this->log("Updating admin credentials.");
 
-        $this->executeDbQuery("update admin_user set firstname = '$this->adminFirstname', lastname = '$this->adminLastname', email = '$this->adminEmail', username = '$this->adminUsername', password='{$this->generatePassword($this->adminPassword)}' where user_id = '1';");
+        $this->executeDbQuery("update admin_user set".
+            " firstname = '{$this->adminVariables['ADMIN_FIRSTNAME']}'," .
+            " lastname = '{$this->adminVariables['ADMIN_LASTNAME']}'," .
+            " email = '{$this->adminVariables['ADMIN_EMAIL']}'," .
+            " username = '{$this->adminVariables['ADMIN_USERNAME']}'," .
+            " password='{$this->generatePassword($this->adminVariables['ADMIN_PASSWORD'])}'" .
+            " where user_id = '1';");
     }
 
     /**
@@ -385,18 +410,30 @@ class Platformsh
             $config['cache']['frontend']['page_cache']['backend_options']['server'] = $this->redisHost;
             $config['cache']['frontend']['page_cache']['backend_options']['port'] = $this->redisPort;
         }
-        $config['backend']['frontName'] = $this->adminUrl;
+        if (empty($this->missingAdminVariables)) {
+            $config['backend']['frontName'] = $this->adminVariables['ADMIN_URL'];
+        }
 
         $updatedConfig = '<?php'  . "\n" . 'return ' . var_export($config, true) . ';';
 
         file_put_contents($configFileName, $updatedConfig);
     }
 
+    /**
+     * Log message
+     * 
+     * @param string $message
+     */
     protected function log($message)
     {
         echo sprintf('[%s] %s', date("Y-m-d H:i:s"), $message) . PHP_EOL;
     }
 
+    /**
+     * Execute command
+     * 
+     * @param string $command
+     */
     protected function execute($command)
     {
         if ($this->debugMode) {
@@ -470,10 +507,6 @@ class Platformsh
     }
 
     /**
-     * Executes database query
-     *
-     * @param string $query
-     * $query must completed, finished with semicolon (;)
      * If branch isn't master - disable Google Analytics
      */
     protected function disableGoogleAnalytics()
